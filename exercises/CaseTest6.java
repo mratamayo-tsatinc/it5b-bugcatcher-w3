@@ -1,4 +1,4 @@
-import [[java.util.scanner]];
+import java.util.[[scanner]];
 
 public class CaseTest6 {
     public static void main(String[] args) {
