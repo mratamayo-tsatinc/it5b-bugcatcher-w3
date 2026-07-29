@@ -1,15 +1,14 @@
 const EXERCISES = [
-	'StarryAscension.java',
-	'RainbowArch.java',
-	'WelcomeMessage.java',
-	'EvenNumberParade.java',
-	'EngagingCharacter.java',
-	'SocialMediaPost.java',
-	'EmailDetailsDisplay.java',
-	'NameInput.java',
-	'Equality.java',
-	'VotingAge.java',
-	'DayWeek.java'
+	'CaseTest1.java',
+	'CaseTest2.java',
+	'CaseTest3.java',
+	'CaseTest4.java',
+	'CaseTest5.java',
+	'CaseTest6.java',
+	'CaseTest7.java',
+	'CaseTest8.java',
+	'CaseTest9.java',
+	'CaseTest10.java'
 ];
 
 let studentDatabase = [];
