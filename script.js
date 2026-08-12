@@ -23,6 +23,9 @@ let scoreModalShown = false;
 // Track whether we've already shown the full-course celebration
 let totalCelebrated = false;
 
+// Key prefix used to namespace saved progress per student in localStorage
+const STORAGE_PREFIX = 'bugcatcher_progress_';
+
 window.onload = async function() {
     try {
         const res = await fetch('students.csv');
@@ -34,6 +37,110 @@ window.onload = async function() {
         });
     } catch (err) { console.error("Database failed to load."); }
 };
+
+    // ---------------------------------------------------------------
+    // PERSISTENCE (keyed by student email)
+    // ---------------------------------------------------------------
+
+    // Persist the current student's progress (per-exercise answers, score,
+    // lock state) to localStorage, namespaced by their email.
+    function saveProgress() {
+        if (!currentUser) return;
+        try {
+            const payload = {};
+            for (const file in exerciseData) {
+                const d = exerciseData[file];
+                payload[file] = {
+                    userProgress: d.userProgress,
+                    lastScore: d.lastScore,
+                    locked: d.locked,
+                    lastVerifiedAt: d.lastVerifiedAt
+                };
+            }
+            localStorage.setItem(STORAGE_PREFIX + currentUser, JSON.stringify({
+                exerciseData: payload,
+                totalCelebrated
+            }));
+        } catch (e) { console.warn('Could not save progress:', e); }
+    }
+
+    // Read whatever we previously saved for this email, if anything.
+    function loadStoredProgress(email) {
+        try {
+            const raw = localStorage.getItem(STORAGE_PREFIX + email);
+            return raw ? JSON.parse(raw) : null;
+        } catch (e) { console.warn('Could not read stored progress:', e); return null; }
+    }
+
+    // Overlay any saved progress for the current student onto the freshly
+    // parsed exerciseData (called after loadAllExercises has fetched/parsed
+    // every exercise file, so answers/html are already in place).
+    function restoreProgress() {
+        const stored = loadStoredProgress(currentUser);
+        if (!stored || !stored.exerciseData) return;
+        for (const file in stored.exerciseData) {
+            const d = exerciseData[file];
+            const saved = stored.exerciseData[file];
+            if (!d || !saved) continue;
+            // Only reapply saved selections if the exercise's token count
+            // still matches (protects against stale data if exercise files change)
+            if (Array.isArray(saved.userProgress) && saved.userProgress.length === d.userProgress.length) {
+                d.userProgress = saved.userProgress;
+            }
+            d.lastScore = saved.lastScore || 0;
+            d.locked = !!saved.locked;
+            d.lastVerifiedAt = saved.lastVerifiedAt || null;
+        }
+        if (typeof stored.totalCelebrated === 'boolean') totalCelebrated = stored.totalCelebrated;
+    }
+
+    // ---------------------------------------------------------------
+    // ITEM RANDOMIZER (exam mode)
+    // ---------------------------------------------------------------
+
+    // Simple deterministic string hash -> 32-bit seed
+    function hashStringToSeed(str) {
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = (hash << 5) - hash + str.charCodeAt(i);
+            hash |= 0;
+        }
+        return hash >>> 0;
+    }
+
+    // Small, fast seeded PRNG (mulberry32) so the shuffle is reproducible
+    // for a given seed instead of relying on Math.random().
+    function mulberry32(seed) {
+        let t = seed >>> 0;
+        return function () {
+            t |= 0; t = (t + 0x6D2B79F5) | 0;
+            let r = Math.imul(t ^ (t >>> 15), 1 | t);
+            r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+            return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
+    function shuffleArray(arr, rng) {
+        const a = arr.slice();
+        for (let i = a.length - 1; i > 0; i--) {
+            const j = Math.floor(rng() * (i + 1));
+            [a[i], a[j]] = [a[j], a[i]];
+        }
+        return a;
+    }
+
+    // Decide the order exercises are loaded/listed in. In exam mode each
+    // student gets their own shuffled order (seeded by their email so it
+    // stays consistent for them across refreshes/logins), which makes it
+    // harder to copy answers off a neighbor by position. Practice mode
+    // always uses the fixed authored order.
+    function getExerciseOrder() {
+        if (appMode === 'exam' && currentUser) {
+            const rng = mulberry32(hashStringToSeed(currentUser + '::examOrder'));
+            return shuffleArray(EXERCISES, rng);
+        }
+        return EXERCISES.slice();
+    }
 
     // SETTINGS & MODAL HANDLERS
     function openSettingsModal() {
@@ -132,6 +239,7 @@ window.onload = async function() {
             if (!data.locked) data.locked = true;
         }
         updateTotalScore();
+        saveProgress();
         showScoreModal('time');
     }
 
@@ -163,7 +271,10 @@ async function loadAllExercises() {
     list.innerHTML = ""; 
     document.getElementById('loader').style.display = 'block';
 
-    for (const fileName of EXERCISES) {
+    exerciseData = {};
+    const orderedExercises = getExerciseOrder();
+
+    for (const fileName of orderedExercises) {
         try {
             const res = await fetch('./exercises/' + fileName);
             const code = await res.text();
@@ -182,6 +293,20 @@ async function loadAllExercises() {
             list.appendChild(li);
         } catch (e) { console.warn("Missing: " + fileName); }
     }
+
+    // Overlay any progress this student already saved (per-email), then
+    // reflect it in the sidebar before anything is clicked/rendered.
+    restoreProgress();
+    for (const fileName in exerciseData) {
+        const d = exerciseData[fileName];
+        const safeId = fileName.replace(/\./g, '-');
+        const scoreSpan = document.getElementById(`score-${safeId}`);
+        if (scoreSpan) {
+            scoreSpan.textContent = `${d.lastScore || 0}/${d.wrongCount}`;
+            scoreSpan.classList.toggle('completed-score', d.locked && d.lastScore === d.wrongCount);
+        }
+    }
+
     document.getElementById('loader').style.display = 'none';
     if (list.firstChild) list.firstChild.click();
     // Set total max score and accumulated score
@@ -249,6 +374,7 @@ function resetCurrentExercise() {
 
     // update total accumulated score
     updateTotalScore();
+    saveProgress();
 }
 
 function updateTotalScore() {
@@ -516,6 +642,8 @@ function toggleToken(index, checkbox) {
             cb.parentElement.classList.remove('disabled');
         }
     });
+
+    saveProgress();
 }
 
 function switchExercise(name, el) {
@@ -535,11 +663,20 @@ function switchExercise(name, el) {
     if (maxLabel) maxLabel.textContent = max;
 
     // Restore previous checkbox selections
+    const data = exerciseData[name];
     const checks = display.querySelectorAll('.token-option input[type="checkbox"]');
     checks.forEach((input, idx) => {
-        input.checked = !!exerciseData[name].userProgress[idx];
+        input.checked = !!data.userProgress[idx];
         if (input.checked) input.parentElement.classList.add('selected');
         else input.parentElement.classList.remove('selected');
+
+        // If this exercise was already verified (e.g. restored from a
+        // previous session), reapply the correct/wrong indicators.
+        if (data.locked && data.answers[idx]) {
+            const isWrong = data.answers[idx].isWrong;
+            if (input.checked && !isWrong) input.parentElement.classList.add('wrong');
+            if (input.checked && isWrong) input.parentElement.classList.add('correct');
+        }
     });
 
     // update selected counter UI
@@ -626,6 +763,7 @@ function checkAnswers() {
 
     // Update total accumulated score
     updateTotalScore();
+    saveProgress();
 
     const msg = document.getElementById('feedback');
     if (score === data.wrongCount) {
